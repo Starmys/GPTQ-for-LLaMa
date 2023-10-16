@@ -1,5 +1,10 @@
+import json
 import numpy as np
 import torch
+from PIL import Image
+
+from llava.constants import IMAGE_TOKEN_INDEX
+from llava.mm_utils import tokenizer_image_token
 
 
 def set_seed(seed):
@@ -14,9 +19,9 @@ def get_wikitext2(nsamples, seed, seqlen, model):
 
     from transformers import AutoTokenizer
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=False)
     except:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=True)
     trainenc = tokenizer("\n\n".join(traindata['text']), return_tensors='pt')
     testenc = tokenizer("\n\n".join(testdata['text']), return_tensors='pt')
 
@@ -24,7 +29,7 @@ def get_wikitext2(nsamples, seed, seqlen, model):
     random.seed(seed)
     trainloader = []
     for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
@@ -40,9 +45,9 @@ def get_ptb(nsamples, seed, seqlen, model):
 
     from transformers import AutoTokenizer
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=False)
     except:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=True)
     trainenc = tokenizer("\n\n".join(traindata['sentence']), return_tensors='pt')
     testenc = tokenizer("\n\n".join(valdata['sentence']), return_tensors='pt')
 
@@ -50,7 +55,7 @@ def get_ptb(nsamples, seed, seqlen, model):
     random.seed(seed)
     trainloader = []
     for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
@@ -66,9 +71,9 @@ def get_c4(nsamples, seed, seqlen, model):
 
     from transformers import AutoTokenizer
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=False)
     except:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=True)
 
     import random
     random.seed(seed)
@@ -79,7 +84,7 @@ def get_c4(nsamples, seed, seqlen, model):
             trainenc = tokenizer(traindata[i]['text'], return_tensors='pt')
             if trainenc.input_ids.shape[1] >= seqlen:
                 break
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
@@ -95,7 +100,7 @@ def get_c4(nsamples, seed, seqlen, model):
             tmp = tokenizer(valdata[i]['text'], return_tensors='pt')
             if tmp.input_ids.shape[1] >= seqlen:
                 break
-        i = random.randint(0, tmp.input_ids.shape[1] - seqlen - 1)
+        i = random.randint(0, tmp.input_ids.shape[1] - seqlen)
         j = i + seqlen
         valenc.append(tmp.input_ids[:, i:j])
     valenc = torch.hstack(valenc)
@@ -117,9 +122,9 @@ def get_ptb_new(nsamples, seed, seqlen, model):
 
     from transformers import AutoTokenizer
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=False)
     except:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=True)
     trainenc = tokenizer(" ".join(traindata['sentence']), return_tensors='pt')
     testenc = tokenizer(" ".join(testdata['sentence']), return_tensors='pt')
 
@@ -127,7 +132,7 @@ def get_ptb_new(nsamples, seed, seqlen, model):
     random.seed(seed)
     trainloader = []
     for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
@@ -143,9 +148,9 @@ def get_c4_new(nsamples, seed, seqlen, model):
 
     from transformers import AutoTokenizer
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=False)
     except:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=True)
 
     import random
     random.seed(seed)
@@ -156,7 +161,7 @@ def get_c4_new(nsamples, seed, seqlen, model):
             trainenc = tokenizer(traindata[i]['text'], return_tensors='pt')
             if trainenc.input_ids.shape[1] >= seqlen:
                 break
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
@@ -176,6 +181,38 @@ def get_c4_new(nsamples, seed, seqlen, model):
     return trainloader, valenc
 
 
+def get_text_vqa(nsamples, seed, seqlen, model):
+    with open("/home/chengzhang/Multimodal-Quantization/open_flamingo/open_flamingo/eval/data/textvqa/train_questions_vqa_format.json") as f:
+        questions = json.loads(f.read())['questions']
+
+    model_arch, tokenizer, image_processor = model
+
+    import random
+    random.seed(seed)
+
+    trainloader = []
+    for _ in range(nsamples):
+        i = random.randint(0, len(questions) - 1)
+        question = questions[i]['question']
+        image_id = questions[i]['image_id']
+        image = Image.open(f'/home/chengzhang/datasets/TextVQA/images/train_images/{image_id}.jpg')
+        if model_arch == 'flamingo':
+            image = image_processor(image.convert("RGB")).unsqueeze(0).unsqueeze(0)
+            text = f"<image> Question: {question} Short answer: "
+            input_ids = tokenizer(text)["input_ids"][:2048]
+        elif model_arch == 'llava':
+            image = image_processor.preprocess(image.convert("RGB"), return_tensors='pt')['pixel_values']
+            text = f'Image: <image> Question: {question} Brief answer: '
+            input_ids = tokenizer_image_token(text, tokenizer, IMAGE_TOKEN_INDEX)[:2048]
+        else:
+            raise ValueError(f'Unsupported model architecture: {model_arch}')
+        image = image.unsqueeze(0).half()
+        input_ids = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0)
+        trainloader.append((input_ids, image))
+
+    return trainloader, None
+
+
 def get_loaders(name, nsamples=128, seed=0, seqlen=2048, model=''):
     if 'wikitext2' in name:
         return get_wikitext2(nsamples, seed, seqlen, model)
@@ -187,3 +224,5 @@ def get_loaders(name, nsamples=128, seed=0, seqlen=2048, model=''):
         if 'new' in name:
             return get_c4_new(nsamples, seed, seqlen, model)
         return get_c4(nsamples, seed, seqlen, model)
+    if 'textvqa' in name:
+        return get_text_vqa(nsamples, seed, seqlen, model)

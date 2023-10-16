@@ -123,7 +123,7 @@ class QuantLlamaAttention(nn.Module):
         qkv_states = qkv_states.view(bsz, q_len, 3, self.num_heads, self.head_dim)
 
         # This updates the query and key states in-place, saving VRAM.
-        triton_rotate_half_(qkv_states[:, :, :2], position_ids)
+        triton_rotate_half_(qkv_states[:, :, :2], torch.tile(position_ids, (qkv_states.shape[0], 1)))
 
         query_states, key_states, value_states = torch.split(qkv_states, 1, dim=2)
         del qkv_states

@@ -1,1 +1,5 @@
 __pycache__/
+wandb
+*.pt
+*.log
+nohup.out

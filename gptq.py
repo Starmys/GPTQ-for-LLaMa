@@ -39,7 +39,7 @@ class Observer:
     def print(self):
         self.loss_list = sorted(self.loss_list, key=lambda s: s[2]['error'], reverse=True)
 
-        table = Texttable()
+        table = Texttable(max_width=120)
 
         table.header(['name', 'error'])
         table.set_cols_dtype(['t', 'f'])
@@ -99,7 +99,7 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
 
     def print_loss(self, name, q_weight, weight_error, timecost):
-        table = Texttable()
+        table = Texttable(max_width=120)
         name += ' ' * (16 - len(name))
 
         table.header(['name', 'weight_error', 'fp_inp_SNR', 'q_inp_SNR', 'time'])

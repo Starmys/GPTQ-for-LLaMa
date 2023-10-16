@@ -5,9 +5,20 @@ import torch
 import torch.nn as nn
 import quant
 
+from llava.model.builder import load_pretrained_model
+from llava.mm_utils import tokenizer_image_token, get_model_name_from_path
+
+# from open_flamingo.src.factory import create_model_and_transforms
+
 from gptq import GPTQ, Observer
 from utils import find_layers, DEV, set_seed, get_wikitext2, get_ptb, get_c4, get_ptb_new, get_c4_new, get_loaders, export_quant_table, gen_conditions
 from texttable import Texttable
+
+
+@torch.no_grad()
+def smooth_weight(linear: torch.nn.Linear, scale: torch.Tensor):
+    # linear.weight.mul_(scale.view(1, -1))
+    setattr(linear, 'scale', scale)
 
 
 def get_llama(model):
@@ -21,24 +32,119 @@ def get_llama(model):
     from transformers import LlamaForCausalLM
     model = LlamaForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
     model.seqlen = 2048
+    model.eval()
     return model
 
 
+def get_mpt(model):
+
+    def skip(*args, **kwargs):
+        pass
+
+    torch.nn.init.kaiming_uniform_ = skip
+    torch.nn.init.uniform_ = skip
+    torch.nn.init.normal_ = skip
+    from transformers import AutoModelForCausalLM
+    model = AutoModelForCausalLM.from_pretrained(model, trust_remote_code=True)
+    model.seqlen = 2048
+    model = model.half()
+    model.eval()
+    return model
+
+
+def get_open_flamingo(checkpoint_path, model_base):
+
+    def skip(*args, **kwargs):
+        pass
+
+    torch.nn.init.kaiming_uniform_ = skip
+    torch.nn.init.uniform_ = skip
+    torch.nn.init.normal_ = skip
+
+    model, image_processor, tokenizer = create_model_and_transforms(
+        "ViT-L-14",
+        "openai",
+        model_base,
+        model_base,
+        cross_attn_every_n_layers=4,
+    )
+    checkpoint = torch.load(checkpoint_path)
+    if "model_state_dict" in checkpoint:
+        checkpoint = checkpoint["model_state_dict"]
+        checkpoint = {k.replace("module.", ""): v for k, v in checkpoint.items()}
+    model.load_state_dict(checkpoint, strict=False)
+    model.cuda()
+    model.eval()
+    tokenizer.padding_side = "left"
+    model.lang_encoder.seqlen = 2048
+    model.seqlen = 2048
+    model = model.to(torch.float16)
+    return model, image_processor, tokenizer
+
+
+def get_llava(model_path, model_base):
+
+    if model_base == 'none':
+        model_base = None
+
+    def skip(*args, **kwargs):
+        pass
+
+    torch.nn.init.kaiming_uniform_ = skip
+    torch.nn.init.uniform_ = skip
+    torch.nn.init.normal_ = skip
+
+    model_name = get_model_name_from_path(model_path)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(
+        model_path, model_base, model_name
+    )
+    model.seqlen = context_len
+    return tokenizer, model, image_processor
+
+
 @torch.no_grad()
-def llama_sequential(model, dataloader, dev):
+def llama_sequential(model, dataloader, dev, arch='llama', multimodal=None):
     print('Starting ...')
 
+    # import ipdb; ipdb.set_trace()
+    top_model = model
+    if multimodal == 'flamingo':
+        model = model.lang_encoder
+        del model.old_decoder_blocks
+        del model.gated_cross_attn_layers
     use_cache = model.config.use_cache
     model.config.use_cache = False
-    layers = model.model.layers
 
-    model.model.embed_tokens = model.model.embed_tokens.to(dev)
-    model.model.norm = model.model.norm.to(dev)
+    if arch == 'llama':
+        layers = model.model.layers
+        model.model.embed_tokens = model.model.embed_tokens.to(dev)
+        model.model.norm = model.model.norm.to(dev)
+        hidden_size = model.config.hidden_size
+        prefix = 'model.layers'
+    elif arch == 'mpt':
+        layers = model.transformer.blocks
+        model.transformer.wte = model.transformer.wte.to(dev)
+        model.transformer.norm_f = model.transformer.norm_f.to(dev)
+        hidden_size = model.config.d_model
+        prefix = 'transformer.blocks'
+    else:
+        raise NotImplementedError
+
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev)
+    inps = torch.zeros((args.nsamples, model.seqlen, hidden_size), dtype=dtype, device=dev)
     cache = {'i': 0, 'attention_mask': None}
+
+    def zfill_ids(x: torch.Tensor):
+        y = torch.zeros((x.shape[0], model.seqlen), dtype=x.dtype, device=x.device)
+        y[:, :x.shape[1]] = x
+        return y
+
+    def zfill_mask(x: torch.Tensor):
+        y = torch.zeros((x.shape[0], x.shape[1], model.seqlen, model.seqlen), dtype=x.dtype, device=x.device)
+        y[:, :, :x.shape[2], :x.shape[3]] = x
+        return y
 
     class Catcher(nn.Module):
 
@@ -46,29 +152,54 @@ def llama_sequential(model, dataloader, dev):
             super().__init__()
             self.module = module
 
+        def condition_vis_x(self, vis_x):
+            self.module.vis_x = vis_x
+
+        def condition_media_locations(self, media_locations):
+            self.module.media_locations = media_locations
+
+        def condition_use_cached_media(self, use_cached_media):
+            self.module.use_cached_media = use_cached_media
+
         def forward(self, inp, **kwargs):
-            inps[cache['i']] = inp
+            inps[cache['i'], :inp.shape[1]] = inp
             cache['i'] += 1
-            cache['attention_mask'] = kwargs['attention_mask']
-            cache['position_ids'] = kwargs['position_ids']
+            if arch == 'llama':
+                cache['attention_mask'] = zfill_mask(kwargs['attention_mask'])
+                cache['position_ids'] = zfill_ids(kwargs['position_ids'])
             raise ValueError
 
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
         try:
-            model(batch[0].to(dev))
+            if multimodal is None:
+                top_model(batch[0].to(dev))
+            elif multimodal == 'llava':
+                top_model(batch[0].to(dev), images=batch[1].to(dev))
+            elif multimodal == 'flamingo':
+                top_model(batch[1].to(dev), batch[0].to(dev))
+            else:
+                raise NotImplementedError
         except ValueError:
             pass
     layers[0] = layers[0].module
 
     layers[0] = layers[0].cpu()
-    model.model.embed_tokens = model.model.embed_tokens.cpu()
-    model.model.norm = model.model.norm.cpu()
+
+    if arch == 'llama':
+        model.model.embed_tokens = model.model.embed_tokens.cpu()
+        model.model.norm = model.model.norm.cpu()
+    elif arch == 'mpt':
+        model.transformer.wte = model.transformer.wte.cpu()
+        model.transformer.norm_f = model.transformer.norm_f.cpu()
+    else:
+        raise NotImplementedError
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
-    attention_mask = cache['attention_mask']
-    position_ids = cache['position_ids']
+    if arch == 'llama':
+        attention_mask = cache['attention_mask']
+        position_ids = cache['position_ids']
 
     print('Ready.')
 
@@ -82,14 +213,38 @@ def llama_sequential(model, dataloader, dev):
         print('+==================+==============+============+===========+=======+')
 
         layer = layers[i].to(dev)
+        if multimodal == 'flamingo':
+            layer.media_locations = zfill_ids(layer.media_locations)
         full = find_layers(layer)
         if args.true_sequential:
-            sequential = [['self_attn.k_proj', 'self_attn.v_proj', 'self_attn.q_proj'], ['self_attn.o_proj'], ['mlp.up_proj', 'mlp.gate_proj'], ['mlp.down_proj']]
+            if arch == 'llama':
+                sequential = [
+                    ['self_attn.k_proj', 'self_attn.v_proj', 'self_attn.q_proj'],
+                    ['self_attn.o_proj'],
+                    ['mlp.up_proj', 'mlp.gate_proj'],
+                    ['mlp.down_proj'],
+                ]
+            elif arch == 'mpt':
+                sequential = [
+                    ['attn.Wqkv'],
+                    ['attn.out_proj'],
+                    ['ffn.up_proj'],
+                    ['ffn.down_proj'],
+                ]
+            else:
+                raise NotImplementedError
+            if multimodal == 'flamingo':
+                sequential = [
+                    ['gated_cross_attn_layer.attn.to_q', 'gated_cross_attn_layer.attn.to_kv'],
+                    ['gated_cross_attn_layer.attn.to_out'],
+                    ['gated_cross_attn_layer.ff.1'],
+                    ['gated_cross_attn_layer.ff.3'],
+                ] + [[f'decoder_layer.{x}' for x in row] for row in sequential]
         else:
             sequential = [list(full.keys())]
 
         for names in sequential:
-            subset = {n: full[n] for n in names}
+            subset = {n: full[n] for n in names if n in full}
             gptq = {}
             for name in subset:
                 gptq[name] = GPTQ(subset[name], observe=args.observe)
@@ -97,8 +252,12 @@ def llama_sequential(model, dataloader, dev):
 
             def add_batch(name):
 
-                def tmp(_, inp, out):
-                    gptq[name].add_batch(inp[0].data, out.data)
+                def tmp(module, inp, out):
+                    if hasattr(module, 'scale'):
+                        scale = module.scale.to(inp[0].data.device).to(inp[0].data.dtype)
+                        gptq[name].add_batch(inp[0].data / scale, out.data)
+                    else:
+                        gptq[name].add_batch(inp[0].data, out.data)
 
                 return tmp
 
@@ -106,13 +265,20 @@ def llama_sequential(model, dataloader, dev):
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
             for j in range(args.nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                if arch == 'llama':
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                else:
+                    outs[j] = layer(inps[j].unsqueeze(0))[0]
             for h in handles:
                 h.remove()
 
             for name in subset:
                 scale, zero, g_idx, error = gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, name=name)
-                quantizers['model.layers.%d.%s' % (i, name)] = (gptq[name].quantizer.cpu(), scale.cpu(), zero.cpu(), g_idx.cpu(), args.wbits, args.groupsize)
+                # scale = torch.zeros((1, gptq[name].columns), dtype=torch.float32)
+                # zero = torch.zeros((1, gptq[name].columns), dtype=torch.int32)
+                # g_idx = torch.zeros((gptq[name].columns, ), dtype=torch.int32)
+                # error = 0.0
+                quantizers['%s.%d.%s' % (prefix, i, name)] = (gptq[name].quantizer.cpu(), scale.cpu(), zero.cpu(), g_idx.cpu(), args.wbits, args.groupsize)
 
                 if args.observe:
                     observer.submit(name=name, layerid=i, gptq=gptq[name], error=error)
@@ -120,7 +286,10 @@ def llama_sequential(model, dataloader, dev):
                     gptq[name].free()
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            if arch == 'llama':
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            else:
+                outs[j] = layer(inps[j].unsqueeze(0))[0]
 
         layers[i] = layer.cpu()
         del layer
@@ -141,7 +310,7 @@ def llama_sequential(model, dataloader, dev):
             error = item[2]['error']
             target = error / 2
 
-            table = Texttable()
+            table = Texttable(max_width=120)
             table.header(['wbits', 'groupsize', 'error'])
             table.set_cols_dtype(['i', 'i', 'f'])
             table.add_row([args.wbits, args.groupsize, error])
@@ -158,7 +327,7 @@ def llama_sequential(model, dataloader, dev):
                 scale, zero, g_idx, error = gptq.fasterquant(percdamp=args.percdamp, groupsize=groupsize, actorder=args.act_order, name=name)
 
                 table.add_row([wbits, groupsize, error])
-                quantizers['model.layers.%d.%s' % (layerid, name)] = (gptq.quantizer.cpu(), scale.cpu(), zero.cpu(), g_idx.cpu(), wbits, groupsize)
+                quantizers['%s.%d.%s' % (prefix, layerid, name)] = (gptq.quantizer.cpu(), scale.cpu(), zero.cpu(), g_idx.cpu(), wbits, groupsize)
 
             print(table.draw())
             print('\n')
@@ -167,7 +336,7 @@ def llama_sequential(model, dataloader, dev):
 
     model.config.use_cache = use_cache
 
-    return quantizers
+    return quantizers, model
 
 
 @torch.no_grad()
@@ -258,7 +427,8 @@ def llama_eval(model, testenc, dev):
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
     print(ppl.item())
 
-    model.config.use_cache = use_cache
+    if multimodal != 'flamingo':
+        model.config.use_cache = use_cache
 
 
 # TODO: perform packing on GPU
@@ -443,7 +613,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     parser.add_argument('model', type=str, help='llama model to load')
-    parser.add_argument('dataset', type=str, choices=['wikitext2', 'ptb', 'c4'], help='Where to extract calibration data from.')
+    parser.add_argument('dataset', type=str, choices=['wikitext2', 'ptb', 'c4', 'textvqa'], help='Where to extract calibration data from.')
     parser.add_argument('--seed', type=int, default=0, help='Seed for sampling the calibration data.')
     parser.add_argument('--nsamples', type=int, default=128, help='Number of calibration data samples.')
     parser.add_argument('--percdamp', type=float, default=.01, help='Percent of the average Hessian diagonal to use for dampening.')
@@ -468,6 +638,9 @@ if __name__ == '__main__':
                         help='Auto upgrade layer precision to higher precision, for example int2 to int4, groupsize 128 to 64. \
             When this feature enabled, `--save` or `--save_safetensors` would be disable.')
     parser.add_argument('--quant-directory', type=str, default=None, help='Specify the directory for export quantization parameters to toml format. `None` means no export by default.')
+    parser.add_argument('--act-scales', type=str, default=None, help='Activation scales for smoothquant.')
+    parser.add_argument('--llava', type=str, default=None, help='LLaVA model path.')
+    parser.add_argument('--flamingo', type=str, default=None, help='Open-Flamingo model path.')
 
     args = parser.parse_args()
 
@@ -479,17 +652,40 @@ if __name__ == '__main__':
     if type(args.load) is not str:
         args.load = args.load.as_posix()
 
+    if 'mpt' in args.model:
+        arch = 'mpt'
+    else:
+        arch = 'llama'
+
+    multimodal = None
     if args.load:
         model = load_quant(args.model, args.load, args.wbits, args.groupsize)
+    elif args.llava:
+        tokenizer, model, image_processor = get_llava(args.llava, args.model)
+        model.eval()
+        multimodal = 'llava'
+        args.model = (multimodal, tokenizer, image_processor)
+    elif args.flamingo:
+        model, image_processor, tokenizer = get_open_flamingo(args.flamingo, args.model)
+        model.eval()
+        multimodal = 'flamingo'
+        args.model = (multimodal, tokenizer, image_processor)
+    elif arch == 'mpt':
+        model = get_mpt(args.model)
     else:
         model = get_llama(args.model)
-        model.eval()
+
+    if args.act_scales is not None:
+        scales = torch.load(args.act_scales)
+        for name, module in model.named_modules():
+            if name.startswith('model.layers.') and name in scales:
+                smooth_weight(module, scales[name])
 
     dataloader, testloader = get_loaders(args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen)
 
     if not args.load and args.wbits < 16 and not args.nearest:
         tick = time.time()
-        quantizers = llama_sequential(model, dataloader, DEV)
+        quantizers, model = llama_sequential(model, dataloader, DEV, arch=arch, multimodal=multimodal)
         print(time.time() - tick)
 
     if args.benchmark:
@@ -524,8 +720,6 @@ if __name__ == '__main__':
         streamer = TextStreamer(tokenizer)
         with torch.no_grad():
             generated_ids = model.generate(input_ids, streamer=streamer)
-        
-
 
     if args.quant_directory is not None:
         export_quant_table(quantizers, args.quant_directory)
