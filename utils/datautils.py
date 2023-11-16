@@ -202,7 +202,8 @@ def get_text_vqa(nsamples, seed, seqlen, model):
             input_ids = tokenizer(text)["input_ids"][:2048]
         elif model_arch == 'llava':
             image = image_processor.preprocess(image.convert("RGB"), return_tensors='pt')['pixel_values']
-            text = f'Image: <image> Question: {question} Brief answer: '
+            # text = f'Image: <image> Question: {question} Brief answer: '
+            text = f'<image>'
             input_ids = tokenizer_image_token(text, tokenizer, IMAGE_TOKEN_INDEX)[:2048]
         else:
             raise ValueError(f'Unsupported model architecture: {model_arch}')
