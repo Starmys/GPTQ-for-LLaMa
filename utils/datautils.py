@@ -195,7 +195,7 @@ def get_text_vqa(nsamples, seed, seqlen, model):
         i = random.randint(0, len(questions) - 1)
         question = questions[i]['question']
         image_id = questions[i]['image_id']
-        image = Image.open(f'/home/chengzhang/datasets/TextVQA/images/train_images/{image_id}.jpg')
+        image = Image.open(f'/home/chengzhang/datasets/TextVQA/images-v0.5/train_images/{image_id}.jpg')
         if model_arch == 'flamingo':
             image = image_processor(image.convert("RGB")).unsqueeze(0).unsqueeze(0)
             text = f"<image> Question: {question} Short answer: "
